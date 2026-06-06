@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import argparse
 import gc
+import logging
 import os
 import sys
 
@@ -101,6 +102,9 @@ def main() -> int:
                     help="CPU threads for quantization (default: PyTorch's default = physical cores). "
                          "Going beyond physical cores (into hyperthreads) rarely helps.")
     args = ap.parse_args()
+
+    # Show INFO logs from the library (e.g. "Saved quantized weights", remaining-modules phase).
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
     # Must be set BEFORE torch is imported to influence the OpenMP/MKL thread pools.
     if args.threads:
@@ -170,7 +174,7 @@ def main() -> int:
             print(f"[skip] {name}: already quantized -> {os.path.basename(weights_path)}")
             continue
 
-        print(f"[build] {name}: loading bf16 transformer on CPU (this needs ~38 GB RAM)...")
+        print(f"[build] {name}: loading bf16 transformer on CPU (this needs ~38 GB RAM)...", flush=True)
         builder = Builder(
             model_class_configurator=LTXModelConfigurator,
             model_path=ckpt_path,
@@ -180,9 +184,10 @@ def main() -> int:
         )
         inner = builder.build(device="cpu", dtype=torch.bfloat16)
 
-        print(f"[quantize] {name}: {args.mode} block-by-block on {device}...")
+        print(f"[quantize] {name}: {args.mode} block-by-block on {device}...", flush=True)
         quantize_model(inner, args.mode, device=device)
 
+        print(f"[save] {name}: writing quantized weights to disk (several GB, ~1-3 min)...", flush=True)
         save_quantized(inner, weights_path, qmap_path)
         print(f"[done] {name}:")
         print(f"        {weights_path}")

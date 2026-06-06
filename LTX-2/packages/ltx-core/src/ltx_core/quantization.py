@@ -133,7 +133,7 @@ def _quantize_blockwise(
         TextColumn("[progress.description]{task.description}"),
         BarColumn(),
         TaskProgressColumn(),
-        transient=True,
+        transient=False,
     ) as progress:
         task = progress.add_task("Quantizing transformer blocks", total=len(transformer_blocks))
 
@@ -152,7 +152,7 @@ def _quantize_blockwise(
 
     # Quantize remaining non-transformer-block modules (e.g., embeddings, timestep projections)
     # Skip modules that should not be quantized (patchify_proj, proj_out, etc.)
-    logger.debug("Quantizing remaining model components")
+    logger.info("Transformer blocks done. Quantizing remaining (non-block) modules...")
 
     for name, module in model.named_children():
         if name == "transformer_blocks":
