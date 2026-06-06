@@ -174,30 +174,43 @@ selon le pipeline — ex. `stage_1_model_ledger`; `with_loras` propage déjà au
 
 ---
 
-## 4. Phase 2 (recommandée) — sauvegarder/recharger le modèle quantifié
+## 4. Phase 2 — sauvegarder/recharger le modèle quantifié ✅ IMPLÉMENTÉE
 
-Évite de re-télécharger/recharger les 38 Go bf16 à chaque démarrage et résout le pic RAM.
+Évite de recharger les 38 Go bf16 à chaque démarrage **et** résout le pic RAM sur la
+machine 24 Go.
 
-**Sauvegarde** (une fois, juste après quantif dans `transformer()` ou script dédié) :
-```python
-from optimum.quanto import quantization_map
-from safetensors.torch import save_file
-import json
-save_file(inner.state_dict(), "ltx-2-19b-distilled.int4.safetensors")
-with open("ltx-2-19b-distilled.int4.qmap.json", "w") as f:
-    json.dump(quantization_map(inner), f)
+Implémentation :
+- `ltx_core/quantization.py` : `prequantized_paths()` (clé = checkpoint + mode + LoRAs),
+  `save_quantized()` (state_dict safetensors + `quantization_map` json), `load_prequantized()`
+  (`requantize` dans un squelette).
+- `ModelLedger.transformer()` : **fast path** si les fichiers pré-quantifiés existent →
+  squelette `meta` (0 RAM) + `requantize`. Sinon **slow path** : build bf16 → quantize →
+  sauvegarde si `MILIMO_QUANT_SAVE=1`.
+
+**Étape 1 — quantifier UNE fois sur la machine 128 Go** (Windows/Linux, peu importe) :
+```bash
+export MILIMO_QUANT=int4-quanto
+export MILIMO_QUANT_SAVE=1          # déclenche la sauvegarde
+# lancer une génération courte de CHAQUE pipeline utilisé (ti2vid, etc.)
+# → écrit, à côté du checkpoint :
+#   ltx-2-19b-distilled.int4-quanto.<hash>.safetensors   (~10 Go)
+#   ltx-2-19b-distilled.int4-quanto.<hash>.qmap.json
+# (un couple par variante de LoRA : stage base + stage distilled-lora)
 ```
 
-**Rechargement rapide** (squelette vide → requantize → load) :
-```python
-from optimum.quanto import requantize
-inner = self.transformer_builder.build(device="cpu", dtype=self.dtype, weights_only_skeleton=...)  # ou build puis vider
-with open("...qmap.json") as f: qmap = json.load(f)
-state = load_file("...int4.safetensors")
-requantize(inner, state, qmap, device=self.device)
-return X0Model(inner).to(self.device).eval()
-```
-→ Le modèle int4 (~9-10 Go) se charge directement, sans jamais matérialiser 38 Go en RAM.
+**Étape 2 — copier** les fichiers `*.int4-quanto.*` dans le même dossier
+`LTX-2/models/checkpoints/` sur la machine **24 Go**.
+
+**Étape 3 — sur la 24 Go** : `export MILIMO_QUANT=int4-quanto` (sans `MILIMO_QUANT_SAVE`).
+Le ledger détecte les fichiers et prend le **fast path** → charge ~10 Go int4 via squelette
+`meta`, sans jamais matérialiser les 38 Go. Le checkpoint bf16 plein n'a même pas besoin
+d'être présent sur la 24 Go (seuls les fichiers int4 + qmap suffisent pour la lecture des
+poids ; le `model_config()` lit la metadata — garder au moins l'en-tête, voir note).
+
+> Note : `model_config()` lit la metadata du checkpoint bf16 (`.metadata()` du safetensors).
+> Sur la 24 Go, garder le `.safetensors` bf16 **ou** s'assurer que la metadata de config est
+> disponible. Si on veut se passer totalement du bf16, il faudra aussi embarquer la config
+> dans le fichier int4 (amélioration future mineure).
 
 ---
 

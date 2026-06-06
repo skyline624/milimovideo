@@ -1,3 +1,4 @@
+import os
 from dataclasses import replace
 
 import torch
@@ -197,13 +198,37 @@ class ModelLedger:
                 "Transformer not initialized. Please provide a checkpoint path to the ModelLedger constructor."
             )
         if self.quant_mode:
-            # optimum-quanto path (takes precedence over fp8). Build the transformer in
-            # full precision on CPU (LoRAs are fused here), then quantize block-by-block
-            # (each block is moved to GPU, quantized, frozen, moved back to CPU).
-            from ltx_core.quantization import quantize_model
+            # optimum-quanto path (takes precedence over fp8).
+            from ltx_core.quantization import (
+                load_prequantized,
+                prequantized_paths,
+                quantize_model,
+                save_quantized,
+            )
 
+            weights_path, qmap_path = prequantized_paths(
+                self.checkpoint_path, self.quant_mode, self.loras
+            )
+
+            # Fast path (low RAM): a previously-saved quantized transformer exists.
+            # Build an architecture-only skeleton on the `meta` device (0 RAM) and
+            # requantize the int weights (~10GB for int4) into it — the full-precision
+            # checkpoint is never materialized.
+            if os.path.exists(weights_path) and os.path.exists(qmap_path):
+                config = self.transformer_builder.model_config()
+                meta_model = self.transformer_builder.meta_model(
+                    config, self.transformer_builder.module_ops
+                )
+                load_prequantized(meta_model, weights_path, qmap_path, self.device)
+                return X0Model(meta_model).to(self.device).eval()
+
+            # Slow path (high RAM): build full precision on CPU (LoRAs fused here),
+            # then quantize block-by-block (each block -> GPU -> quantize -> freeze -> CPU).
+            # Set MILIMO_QUANT_SAVE=1 to persist the result for fast low-RAM reloads.
             inner = self.transformer_builder.build(device="cpu", dtype=self.dtype)
             quantize_model(inner, self.quant_mode, device=self.device)
+            if os.environ.get("MILIMO_QUANT_SAVE"):
+                save_quantized(inner, weights_path, qmap_path)
             return X0Model(inner).to(self.device).eval()
         if self.fp8transformer:
             fp8_builder = replace(

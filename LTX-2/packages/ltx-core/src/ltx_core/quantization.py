@@ -194,3 +194,74 @@ def _get_quanto_dtype(precision: QuantizationOptions) -> torch.dtype:
             return qfloat8_e4m3fnuz
 
     raise ValueError(f"Invalid quantization precision: {precision}")
+
+
+# ---------------------------------------------------------------------------
+# Save / load of already-quantized transformers (Phase 2)
+#
+# Quantizing from the full bf16 checkpoint needs the whole model in RAM (~38GB
+# for LTX-2 19B). To run on a low-RAM machine, quantize once on a big-RAM box,
+# save the int weights here, then load them via an empty `meta` skeleton +
+# `requantize` (never materializing the full-precision model).
+# ---------------------------------------------------------------------------
+
+
+def prequantized_paths(
+    checkpoint_path: str,
+    quant_mode: str,
+    loras: tuple | None = None,
+) -> tuple[str, str]:
+    """Deterministic (weights, qmap) paths next to the source checkpoint.
+
+    The LoRA set is folded into the cache key so that variants built with
+    different LoRAs (e.g. a base vs. distilled-LoRA stage) never collide.
+    """
+    import hashlib
+    import os
+
+    lora_sig = "|".join(
+        f"{getattr(lora, 'path', lora)}:{getattr(lora, 'strength', '')}" for lora in (loras or ())
+    )
+    key = hashlib.sha1(f"{quant_mode}|{lora_sig}".encode()).hexdigest()[:8]
+    base, _ = os.path.splitext(checkpoint_path)
+    return f"{base}.{quant_mode}.{key}.safetensors", f"{base}.{quant_mode}.{key}.qmap.json"
+
+
+def save_quantized(model: torch.nn.Module, weights_path: str, qmap_path: str) -> None:
+    """Persist a quanto-quantized model's int weights + quantization map."""
+    import json
+
+    from optimum.quanto import quantization_map  # noqa: PLC0415
+    from safetensors.torch import save_file  # noqa: PLC0415
+
+    save_file(model.state_dict(), weights_path)
+    with open(qmap_path, "w") as f:
+        json.dump(quantization_map(model), f)
+    logger.info(f"Saved quantized weights -> {weights_path}")
+
+
+def load_prequantized(
+    meta_model: torch.nn.Module,
+    weights_path: str,
+    qmap_path: str,
+    device: torch.device | str,
+) -> torch.nn.Module:
+    """Reconstitute a quantized model in place from saved int weights + qmap.
+
+    `meta_model` should be an architecture-only skeleton (e.g. built on the
+    ``meta`` device). `requantize` converts its linear layers to quanto and
+    loads the int weights, so the full-precision model is never materialized.
+    """
+    import json
+
+    from optimum.quanto import requantize  # noqa: PLC0415
+    from safetensors.torch import load_file  # noqa: PLC0415
+
+    if isinstance(device, str):
+        device = torch.device(device)
+    state_dict = load_file(weights_path)
+    with open(qmap_path) as f:
+        qmap = json.load(f)
+    requantize(meta_model, state_dict, qmap, device=device)
+    logger.info(f"Loaded prequantized weights <- {weights_path}")
+    return meta_model
