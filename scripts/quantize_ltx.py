@@ -34,6 +34,8 @@ Options:
     --ckpt-name NAME      Override the checkpoint filename.
     --lora-name NAME      Override the distilled LoRA filename.
     --repo  REPO_ID       Override the HuggingFace repo id (default: Lightricks/LTX-2).
+    --threads N           CPU threads for quantization (sets OMP/MKL + torch.set_num_threads).
+                          Default = PyTorch's default (physical cores). Hyperthreads rarely help.
 """
 
 from __future__ import annotations
@@ -95,7 +97,15 @@ def main() -> int:
     ap.add_argument("--ckpt-name", default=DEFAULT_CKPT)
     ap.add_argument("--lora-name", default=DEFAULT_LORA)
     ap.add_argument("--repo", default=DEFAULT_REPO)
+    ap.add_argument("--threads", type=int, default=None,
+                    help="CPU threads for quantization (default: PyTorch's default = physical cores). "
+                         "Going beyond physical cores (into hyperthreads) rarely helps.")
     args = ap.parse_args()
+
+    # Must be set BEFORE torch is imported to influence the OpenMP/MKL thread pools.
+    if args.threads:
+        os.environ["OMP_NUM_THREADS"] = str(args.threads)
+        os.environ["MKL_NUM_THREADS"] = str(args.threads)
 
     _add_local_packages_to_path()
 
@@ -116,6 +126,14 @@ def main() -> int:
         want_lora = False
 
     import torch  # noqa: PLC0415
+
+    if args.threads:
+        torch.set_num_threads(args.threads)
+        try:
+            torch.set_num_interop_threads(args.threads)
+        except RuntimeError:
+            pass  # interop threads can only be set once / before any parallel work
+        print(f"[threads] requested {args.threads} | torch.get_num_threads()={torch.get_num_threads()}")
 
     from ltx_core.loader.primitives import LoraPathStrengthAndSDOps  # noqa: PLC0415
     from ltx_core.loader.registry import DummyRegistry  # noqa: PLC0415
