@@ -36,6 +36,13 @@ Options:
     --repo  REPO_ID       Override the HuggingFace repo id (default: Lightricks/LTX-2).
     --threads N           CPU threads for quantization (sets OMP/MKL + torch.set_num_threads).
                           Default = PyTorch's default (physical cores). Hyperthreads rarely help.
+    --slim                Also write <ckpt>.slim.safetensors (VAE/audio/text-encoder, no
+                          transformer) so the ~42GB bf16 checkpoint isn't needed at runtime.
+    --skip-quant          Skip quantization (e.g. `--slim --skip-quant` to only build the
+                          slim file when the int files already exist).
+
+Already quantized and just want the slim file (no re-quant):
+    milimov\Scripts\python.exe scripts\quantize_ltx.py --slim --skip-quant
 """
 
 from __future__ import annotations
@@ -87,6 +94,45 @@ def download_models(repo: str, models_dir: str, ckpt_name: str, lora_name: str, 
         hf_hub_download(repo_id=repo, filename=name, local_dir=checkpoints_dir)
 
 
+# All transformer weights live under this prefix in the comfy-format checkpoint
+# (see LTXV_MODEL_COMFY_RENAMING_MAP). Everything else (vae.*, audio_vae.*, vocoder.*,
+# per_channel_statistics.*, text-encoder connector) is small and kept in the slim file.
+TRANSFORMER_PREFIX = "model.diffusion_model."
+
+
+def extract_slim_checkpoint(ckpt_path: str) -> str:
+    """Write a transformer-less copy of the checkpoint (VAE / audio VAE / vocoder /
+    text-encoder + metadata). The big ``model.diffusion_model.*`` weights are dropped —
+    at runtime the transformer is served from the quantized int files instead. This lets
+    the 24GB machine avoid keeping the ~42GB bf16 checkpoint.
+
+    Output: ``<checkpoint>.slim.safetensors``. On the 24GB machine, RENAME it to the
+    original checkpoint name (e.g. ``ltx-2-19b-distilled.safetensors``) so the loader
+    finds both its metadata/config and the matching quantized files.
+    """
+    from safetensors import safe_open  # noqa: PLC0415
+    from safetensors.torch import save_file  # noqa: PLC0415
+
+    base, _ = os.path.splitext(ckpt_path)
+    out_path = f"{base}.slim.safetensors"
+    tensors = {}
+    kept = dropped = 0
+    print(f"[slim] extracting non-transformer weights from {os.path.basename(ckpt_path)}...", flush=True)
+    with safe_open(ckpt_path, framework="pt", device="cpu") as f:
+        metadata = f.metadata()  # preserve __metadata__ (config) so model_config() works
+        for key in f.keys():
+            if key.startswith(TRANSFORMER_PREFIX):
+                dropped += 1
+                continue
+            tensors[key] = f.get_tensor(key)
+            kept += 1
+    save_file(tensors, out_path, metadata=metadata)
+    size_gb = os.path.getsize(out_path) / 1e9
+    print(f"[slim] kept {kept} keys, dropped {dropped} transformer keys "
+          f"-> {out_path} ({size_gb:.2f} GB)", flush=True)
+    return out_path
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Quantize LTX-2 19B transformer (optimum-quanto).")
     ap.add_argument("--mode", default="int4-quanto",
@@ -101,6 +147,11 @@ def main() -> int:
     ap.add_argument("--threads", type=int, default=None,
                     help="CPU threads for quantization (default: PyTorch's default = physical cores). "
                          "Going beyond physical cores (into hyperthreads) rarely helps.")
+    ap.add_argument("--slim", action="store_true",
+                    help="Also write a transformer-less '.slim.safetensors' (VAE/audio/text-encoder "
+                         "only) so the ~42GB bf16 checkpoint isn't needed at runtime.")
+    ap.add_argument("--skip-quant", action="store_true",
+                    help="Skip quantization (e.g. to only build the --slim file when int files exist).")
     args = ap.parse_args()
 
     # Show INFO logs from the library (e.g. "Saved quantized weights", remaining-modules phase).
@@ -165,44 +216,55 @@ def main() -> int:
             ("distilled-lora", (LoraPathStrengthAndSDOps(lora_path, 1.0, None),))
         )
 
-    print(f"\n=== Quantizing LTX-2 transformer: mode={args.mode}, device={device} ===")
-    print(f"checkpoint: {ckpt_path}\n")
+    if not args.skip_quant:
+        print(f"\n=== Quantizing LTX-2 transformer: mode={args.mode}, device={device} ===")
+        print(f"checkpoint: {ckpt_path}\n")
 
-    for name, loras in variants:
-        weights_path, qmap_path = prequantized_paths(ckpt_path, args.mode, loras)
-        if os.path.exists(weights_path) and os.path.exists(qmap_path):
-            print(f"[skip] {name}: already quantized -> {os.path.basename(weights_path)}")
-            continue
+        for name, loras in variants:
+            weights_path, qmap_path = prequantized_paths(ckpt_path, args.mode, loras)
+            if os.path.exists(weights_path) and os.path.exists(qmap_path):
+                print(f"[skip] {name}: already quantized -> {os.path.basename(weights_path)}")
+                continue
 
-        print(f"[build] {name}: loading bf16 transformer on CPU (this needs ~38 GB RAM)...", flush=True)
-        builder = Builder(
-            model_class_configurator=LTXModelConfigurator,
-            model_path=ckpt_path,
-            model_sd_ops=LTXV_MODEL_COMFY_RENAMING_MAP,
-            loras=loras,
-            registry=DummyRegistry(),
-        )
-        inner = builder.build(device="cpu", dtype=torch.bfloat16)
+            print(f"[build] {name}: loading bf16 transformer on CPU (this needs ~38 GB RAM)...", flush=True)
+            builder = Builder(
+                model_class_configurator=LTXModelConfigurator,
+                model_path=ckpt_path,
+                model_sd_ops=LTXV_MODEL_COMFY_RENAMING_MAP,
+                loras=loras,
+                registry=DummyRegistry(),
+            )
+            inner = builder.build(device="cpu", dtype=torch.bfloat16)
 
-        print(f"[quantize] {name}: {args.mode} block-by-block on {device}...", flush=True)
-        quantize_model(inner, args.mode, device=device)
+            print(f"[quantize] {name}: {args.mode} block-by-block on {device}...", flush=True)
+            quantize_model(inner, args.mode, device=device)
 
-        print(f"[save] {name}: writing quantized weights to disk (several GB, ~1-3 min)...", flush=True)
-        save_quantized(inner, weights_path, qmap_path)
-        print(f"[done] {name}:")
-        print(f"        {weights_path}")
-        print(f"        {qmap_path}\n")
+            print(f"[save] {name}: writing quantized weights to disk (several GB, ~1-3 min)...", flush=True)
+            save_quantized(inner, weights_path, qmap_path)
+            print(f"[done] {name}:")
+            print(f"        {weights_path}")
+            print(f"        {qmap_path}\n")
 
-        del inner, builder
-        gc.collect()
-        if device.type == "cuda":
-            torch.cuda.empty_cache()
+            del inner, builder
+            gc.collect()
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
 
-    print("=== Finished. Copy the *.{mode}.*.safetensors + *.qmap.json files into\n"
-          "    LTX-2/models/checkpoints/ on your 24GB machine, then set MILIMO_QUANT="
-          f"{args.mode}. ===")
-    print("Note: the bf16 checkpoint is still needed at runtime for the VAE / audio /\n"
-          "text-encoder components (only the big transformer is int-quantized).")
+    if args.slim:
+        print()
+        extract_slim_checkpoint(ckpt_path)
+
+    print("\n=== Finished. ===")
+    print(f"1) Copy *.{args.mode}.*.safetensors + *.qmap.json into LTX-2/models/checkpoints/ "
+          "on your 24GB machine.")
+    if args.slim:
+        print("2) Copy the *.slim.safetensors file too, and RENAME it to the original "
+              f"checkpoint name ({os.path.basename(ckpt_path)}) on the 24GB machine.")
+        print("   -> The 42GB bf16 checkpoint is then NOT needed there.")
+    else:
+        print("2) The bf16 checkpoint is still needed at runtime for VAE/audio/text-encoder "
+              "(re-run with --slim --skip-quant to avoid copying the 42GB file).")
+    print(f"3) Set MILIMO_QUANT={args.mode} and run the backend.")
     return 0
 
 
