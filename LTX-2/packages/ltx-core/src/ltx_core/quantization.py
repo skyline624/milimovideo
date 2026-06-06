@@ -219,8 +219,11 @@ def prequantized_paths(
     import hashlib
     import os
 
+    # Use the LoRA *basename* (not the full path) so the cache key is portable
+    # across machines/OSes — a model quantized on Windows must be found on Linux.
     lora_sig = "|".join(
-        f"{getattr(lora, 'path', lora)}:{getattr(lora, 'strength', '')}" for lora in (loras or ())
+        f"{os.path.basename(str(getattr(lora, 'path', lora)))}:{getattr(lora, 'strength', '')}"
+        for lora in (loras or ())
     )
     key = hashlib.sha1(f"{quant_mode}|{lora_sig}".encode()).hexdigest()[:8]
     base, _ = os.path.splitext(checkpoint_path)
