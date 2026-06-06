@@ -94,6 +94,7 @@ class ModelLedger:
         loras: LoraPathStrengthAndSDOps | None = None,
         registry: Registry | None = None,
         fp8transformer: bool = False,
+        quant_mode: str | None = None,
     ):
         self.dtype = dtype
         self.device = device
@@ -104,6 +105,9 @@ class ModelLedger:
         self.loras = loras or ()
         self.registry = registry or DummyRegistry()
         self.fp8transformer = fp8transformer
+        # Optional optimum-quanto quantization mode for the transformer
+        # (e.g. "int4-quanto", "int8-quanto"). Takes precedence over fp8transformer.
+        self.quant_mode = quant_mode
         self.build_model_builders()
 
     def build_model_builders(self) -> None:
@@ -184,6 +188,7 @@ class ModelLedger:
             loras=(*self.loras, *loras),
             registry=self.registry,
             fp8transformer=self.fp8transformer,
+            quant_mode=self.quant_mode,
         )
 
     def transformer(self) -> X0Model:
@@ -191,6 +196,15 @@ class ModelLedger:
             raise ValueError(
                 "Transformer not initialized. Please provide a checkpoint path to the ModelLedger constructor."
             )
+        if self.quant_mode:
+            # optimum-quanto path (takes precedence over fp8). Build the transformer in
+            # full precision on CPU (LoRAs are fused here), then quantize block-by-block
+            # (each block is moved to GPU, quantized, frozen, moved back to CPU).
+            from ltx_core.quantization import quantize_model
+
+            inner = self.transformer_builder.build(device="cpu", dtype=self.dtype)
+            quantize_model(inner, self.quant_mode, device=self.device)
+            return X0Model(inner).to(self.device).eval()
         if self.fp8transformer:
             fp8_builder = replace(
                 self.transformer_builder,

@@ -19,3 +19,4 @@ diffusers
 scikit-image
 sqlmodel
 sse-starlette
+optimum-quanto>=0.2.4

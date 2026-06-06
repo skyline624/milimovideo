@@ -58,6 +58,7 @@ class ICLoraPipeline:
         loras: list[LoraPathStrengthAndSDOps],
         device: torch.device = device,
         fp8transformer: bool = False,
+        quant_mode: str | None = None,
     ):
         self.dtype = torch.bfloat16
         self.stage_1_model_ledger = ModelLedger(
@@ -68,6 +69,7 @@ class ICLoraPipeline:
             gemma_root_path=gemma_root,
             loras=loras,
             fp8transformer=fp8transformer,
+            quant_mode=quant_mode,
         )
         self.stage_2_model_ledger = ModelLedger(
             dtype=self.dtype,
@@ -77,6 +79,7 @@ class ICLoraPipeline:
             gemma_root_path=gemma_root,
             loras=[],
             fp8transformer=fp8transformer,
+            quant_mode=quant_mode,
         )
         self.pipeline_components = PipelineComponents(
             dtype=self.dtype,

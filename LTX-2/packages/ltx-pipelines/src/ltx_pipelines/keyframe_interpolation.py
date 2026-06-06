@@ -58,6 +58,7 @@ class KeyframeInterpolationPipeline:
         loras: list[LoraPathStrengthAndSDOps],
         device: torch.device = device,
         fp8transformer: bool = False,
+        quant_mode: str | None = None,
     ):
         self.device = device
         self.dtype = torch.bfloat16
@@ -69,6 +70,7 @@ class KeyframeInterpolationPipeline:
             gemma_root_path=gemma_root,
             loras=loras,
             fp8transformer=fp8transformer,
+            quant_mode=quant_mode,
         )
         self.stage_2_model_ledger = self.stage_1_model_ledger.with_loras(
             loras=distilled_lora,

@@ -37,8 +37,21 @@ class ModelManager:
         # Priority 2: FP8 (Smaller, but requires cast on MPS)
         ckpt_fp8 = os.path.join(models_dir, "checkpoints", "ltx-2-19b-distilled-fp8.safetensors")
         
+        # quanto quantization needs the full-precision (bf16) checkpoint as source.
+        quant_mode = os.environ.get("MILIMO_QUANT")
+
         selected_ckpt = ckpt_full
-        if os.path.exists(ckpt_full):
+        if quant_mode:
+            # Force the full bf16 checkpoint; quanto quantizes from it on load.
+            selected_ckpt = ckpt_full
+            if os.path.exists(ckpt_full):
+                logger.info(f"[quant={quant_mode}] Quantizing from full checkpoint: {ckpt_full}")
+            else:
+                logger.warning(
+                    f"[quant={quant_mode}] Full bf16 checkpoint not found at {ckpt_full}. "
+                    "quanto requires the full-precision checkpoint as source."
+                )
+        elif os.path.exists(ckpt_full):
             logger.info(f"Selected Main Checkpoint: {ckpt_full}")
         elif os.path.exists(ckpt_fp8):
             selected_ckpt = ckpt_fp8
@@ -104,8 +117,15 @@ class ModelManager:
                 )
 
             is_mps = (device == "mps")
-            fp8 = False if is_mps else True 
-            
+            fp8 = False if is_mps else True
+
+            # Optional quanto quantization (e.g. MILIMO_QUANT=int4-quanto) — fits LTX-2 19B
+            # into ~10GB (int4) / ~19GB (int8) of VRAM. Takes precedence over fp8.
+            quant_mode = os.environ.get("MILIMO_QUANT")
+            if quant_mode:
+                fp8 = False  # quanto replaces fp8
+                logger.info(f"Quantization enabled: {quant_mode} (fp8 disabled)")
+
             if pipeline_type == "ti2vid":
                 self._pipeline = TI2VidTwoStagesPipeline(
                     checkpoint_path=paths["checkpoint_path"],
@@ -115,7 +135,8 @@ class ModelManager:
                     gemma_root=paths["gemma_root"],
                     loras=loras,
                     device=device,
-                    fp8transformer=fp8
+                    fp8transformer=fp8,
+                    quant_mode=quant_mode
                 )
             elif pipeline_type == "ic_lora":
                 # ICLoraPipeline takes 'loras' as the specific IC-LoRA
@@ -125,7 +146,8 @@ class ModelManager:
                     gemma_root=paths["gemma_root"],
                     loras=loras, # These will be the IC-LoRAs
                     device=device,
-                    fp8transformer=fp8
+                    fp8transformer=fp8,
+                    quant_mode=quant_mode
                 )
             elif pipeline_type == "keyframe":
                 self._pipeline = KeyframeInterpolationPipeline(
@@ -135,7 +157,8 @@ class ModelManager:
                     gemma_root=paths["gemma_root"],
                     loras=loras,
                     device=device,
-                    fp8transformer=fp8
+                    fp8transformer=fp8,
+                    quant_mode=quant_mode
                 )
             else:
                 raise ValueError(f"Unknown pipeline type: {pipeline_type}")

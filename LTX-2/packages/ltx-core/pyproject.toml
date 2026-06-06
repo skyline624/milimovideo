@@ -13,6 +13,7 @@ dependencies = [
     "safetensors",
     "accelerate",
     "scipy>=1.14",
+    "optimum-quanto>=0.2.4",
 ]
 
 [project.optional-dependencies]
