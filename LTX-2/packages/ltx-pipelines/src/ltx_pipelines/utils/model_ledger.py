@@ -267,7 +267,12 @@ class ModelLedger:
                 "ModelLedger constructor."
             )
 
-        return self.text_encoder_builder.build(device=self._target_device(), dtype=self.dtype).to(self.device).eval()
+        te = self.text_encoder_builder.build(device=self._target_device(), dtype=self.dtype)
+        # The 12B gemma text encoder is ~24GB in bf16 — it does not fit on a 24GB GPU, and is
+        # used once per generation then freed. MILIMO_TEXT_ENCODER_CPU=1 keeps it on CPU;
+        # encode_text is device-agnostic and pipelines move the tiny embeddings to the GPU.
+        te_device = "cpu" if os.environ.get("MILIMO_TEXT_ENCODER_CPU") else self.device
+        return te.to(te_device).eval()
 
     def audio_decoder(self) -> AudioDecoder:
         if not hasattr(self, "audio_decoder_builder"):

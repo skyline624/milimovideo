@@ -15,7 +15,7 @@ from ltx_core.model.video_vae import TilingConfig, VideoEncoder, get_video_chunk
 from ltx_core.model.video_vae import decode_video as vae_decode_video
 from ltx_core.text_encoders.gemma import encode_text
 from ltx_core.types import LatentState, VideoPixelShape
-from ltx_pipelines.utils import ModelLedger
+from ltx_pipelines.utils import ModelLedger, context_to_device
 from ltx_pipelines.utils.args import VideoConditioningAction, default_2_stage_distilled_arg_parser
 from ltx_pipelines.utils.constants import (
     AUDIO_SAMPLE_RATE,
@@ -115,7 +115,9 @@ class ICLoraPipeline:
             prompt = generate_enhanced_prompt(
                 text_encoder, prompt, images[0][0] if len(images) > 0 else None, seed=seed
             )
-        video_context, audio_context = encode_text(text_encoder, prompts=[prompt])[0]
+        video_context, audio_context = context_to_device(
+            encode_text(text_encoder, prompts=[prompt])[0], self.device
+        )
 
         synchronize_device()
         del text_encoder

@@ -94,34 +94,40 @@ def download_models(repo: str, models_dir: str, ckpt_name: str, lora_name: str, 
         hf_hub_download(repo_id=repo, filename=name, local_dir=checkpoints_dir)
 
 
-# All transformer weights live under this prefix in the comfy-format checkpoint
+# Most transformer weights live under this prefix in the comfy-format checkpoint
 # (see LTXV_MODEL_COMFY_RENAMING_MAP). Everything else (vae.*, audio_vae.*, vocoder.*,
-# per_channel_statistics.*, text-encoder connector) is small and kept in the slim file.
+# per_channel_statistics.*, text_embedding_projection.*) is small and kept in the slim file.
 TRANSFORMER_PREFIX = "model.diffusion_model."
 
+# ...EXCEPT these, which also live under model.diffusion_model.* but are needed at runtime
+# by the gemma text encoder (the video/audio embedding connectors). They are tiny — keep them.
+SLIM_KEEP_SUBSTRINGS = ("embeddings_connector",)
 
-def extract_slim_checkpoint(ckpt_path: str) -> str:
+
+def extract_slim_checkpoint(ckpt_path: str, out_dir: str | None = None) -> str:
     """Write a transformer-less copy of the checkpoint (VAE / audio VAE / vocoder /
-    text-encoder + metadata). The big ``model.diffusion_model.*`` weights are dropped —
-    at runtime the transformer is served from the quantized int files instead. This lets
-    the 24GB machine avoid keeping the ~42GB bf16 checkpoint.
+    text-encoder connectors + metadata). The big ``model.diffusion_model.*`` transformer
+    weights are dropped — at runtime the transformer is served from the quantized int files
+    instead. This lets the 24GB machine avoid keeping the ~42GB bf16 checkpoint.
 
-    Output: ``<checkpoint>.slim.safetensors``. On the 24GB machine, RENAME it to the
-    original checkpoint name (e.g. ``ltx-2-19b-distilled.safetensors``) so the loader
-    finds both its metadata/config and the matching quantized files.
+    Output: ``<checkpoint>.slim.safetensors`` (in ``out_dir`` if given). On the 24GB machine,
+    RENAME it to the original checkpoint name (e.g. ``ltx-2-19b-distilled.safetensors``) so
+    the loader finds both its metadata/config and the matching quantized files.
     """
     from safetensors import safe_open  # noqa: PLC0415
     from safetensors.torch import save_file  # noqa: PLC0415
 
     base, _ = os.path.splitext(ckpt_path)
     out_path = f"{base}.slim.safetensors"
+    if out_dir:
+        out_path = os.path.join(out_dir, os.path.basename(out_path))
     tensors = {}
     kept = dropped = 0
     print(f"[slim] extracting non-transformer weights from {os.path.basename(ckpt_path)}...", flush=True)
     with safe_open(ckpt_path, framework="pt", device="cpu") as f:
         metadata = f.metadata()  # preserve __metadata__ (config) so model_config() works
         for key in f.keys():
-            if key.startswith(TRANSFORMER_PREFIX):
+            if key.startswith(TRANSFORMER_PREFIX) and not any(s in key for s in SLIM_KEEP_SUBSTRINGS):
                 dropped += 1
                 continue
             tensors[key] = f.get_tensor(key)
@@ -274,7 +280,7 @@ def main() -> int:
 
     if args.slim:
         print()
-        extract_slim_checkpoint(ckpt_path)
+        extract_slim_checkpoint(ckpt_path, args.out_dir)
 
     print("\n=== Finished. ===")
     print(f"1) Copy *.{args.mode}.*.safetensors + *.qmap.json into LTX-2/models/checkpoints/ "

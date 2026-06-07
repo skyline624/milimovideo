@@ -17,7 +17,7 @@ from ltx_core.model.video_vae import TilingConfig, get_video_chunks_number
 from ltx_core.model.video_vae import decode_video as vae_decode_video
 from ltx_core.text_encoders.gemma import encode_text
 from ltx_core.types import LatentState, VideoPixelShape
-from ltx_pipelines.utils import ModelLedger
+from ltx_pipelines.utils import ModelLedger, context_to_device
 from ltx_pipelines.utils.args import default_2_stage_arg_parser
 from ltx_pipelines.utils.constants import (
     AUDIO_SAMPLE_RATE,
@@ -122,6 +122,10 @@ class TI2VidTwoStagesPipeline:
                 text_encoder, prompt, images[0][0] if len(images) > 0 else None, seed=seed
             )
         context_p, context_n = encode_text(text_encoder, prompts=[prompt, negative_prompt])
+        # Move embeddings to the compute device (no-op if the text encoder ran on GPU; needed
+        # when it ran on CPU via MILIMO_TEXT_ENCODER_CPU).
+        context_p = context_to_device(context_p, self.device)
+        context_n = context_to_device(context_n, self.device)
         v_context_p, a_context_p = context_p
         v_context_n, a_context_n = context_n
 

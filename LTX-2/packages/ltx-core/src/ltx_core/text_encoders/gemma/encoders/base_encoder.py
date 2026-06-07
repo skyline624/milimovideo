@@ -1,4 +1,5 @@
 import functools
+import os
 from pathlib import Path
 
 import torch
@@ -254,9 +255,20 @@ def module_ops_from_gemma_root(gemma_root: str) -> tuple[ModuleOps, ...]:
     processor_path = _find_matching_dir(gemma_root, "preprocessor_config.json")
 
     def load_gemma(module: GemmaTextEncoderModelBase) -> GemmaTextEncoderModelBase:
-        module.model = Gemma3ForConditionalGeneration.from_pretrained(
-            gemma_path, local_files_only=True, dtype=torch.bfloat16
-        )
+        from_kwargs = {"local_files_only": True, "dtype": torch.bfloat16}
+        if os.environ.get("MILIMO_GEMMA_4BIT"):
+            # Load the 12B gemma directly in 4-bit (bitsandbytes nf4) so it fits on the GPU
+            # (~7GB vs ~24GB bf16) — used once per generation then freed. Prebuilt kernels,
+            # no nvcc / separate quantization step, low load-time memory.
+            from transformers import BitsAndBytesConfig  # noqa: PLC0415
+
+            from_kwargs["quantization_config"] = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=torch.bfloat16,
+            )
+            from_kwargs["device_map"] = "cuda"
+        module.model = Gemma3ForConditionalGeneration.from_pretrained(gemma_path, **from_kwargs)
         return module
 
     def load_tokenizer(module: GemmaTextEncoderModelBase) -> GemmaTextEncoderModelBase:
