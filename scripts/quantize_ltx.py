@@ -152,6 +152,14 @@ def main() -> int:
                          "only) so the ~42GB bf16 checkpoint isn't needed at runtime.")
     ap.add_argument("--skip-quant", action="store_true",
                     help="Skip quantization (e.g. to only build the --slim file when int files exist).")
+    ap.add_argument("--ckpt", default=None,
+                    help="Explicit checkpoint path (e.g. on a USB key). Overrides --models-dir/--ckpt-name. "
+                         "Lets you quantize directly from external storage via mmap (no local copy).")
+    ap.add_argument("--lora", default=None,
+                    help="Explicit distilled-LoRA path. Overrides --models-dir/--lora-name.")
+    ap.add_argument("--out-dir", default=None,
+                    help="Directory to write the quantized files into (default: next to the checkpoint). "
+                         "Use this to read a bf16 checkpoint from USB but write the small int files locally.")
     args = ap.parse_args()
 
     # Show INFO logs from the library (e.g. "Saved quantized weights", remaining-modules phase).
@@ -165,9 +173,11 @@ def main() -> int:
     _add_local_packages_to_path()
 
     models_dir = _resolve_models_dir(args.models_dir)
-    ckpt_path = os.path.join(models_dir, "checkpoints", args.ckpt_name)
-    lora_path = os.path.join(models_dir, "checkpoints", args.lora_name)
+    ckpt_path = args.ckpt or os.path.join(models_dir, "checkpoints", args.ckpt_name)
+    lora_path = args.lora or os.path.join(models_dir, "checkpoints", args.lora_name)
     want_lora = not args.no_lora_variant
+    if args.out_dir:
+        os.makedirs(args.out_dir, exist_ok=True)
 
     if args.download:
         download_models(args.repo, models_dir, args.ckpt_name, args.lora_name, want_lora)
@@ -222,6 +232,9 @@ def main() -> int:
 
         for name, loras in variants:
             weights_path, qmap_path = prequantized_paths(ckpt_path, args.mode, loras)
+            if args.out_dir:
+                weights_path = os.path.join(args.out_dir, os.path.basename(weights_path))
+                qmap_path = os.path.join(args.out_dir, os.path.basename(qmap_path))
             if os.path.exists(weights_path) and os.path.exists(qmap_path):
                 print(f"[skip] {name}: already quantized -> {os.path.basename(weights_path)}")
                 continue
@@ -239,13 +252,22 @@ def main() -> int:
             print(f"[quantize] {name}: {args.mode} block-by-block on {device}...", flush=True)
             quantize_model(inner, args.mode, device=device)
 
+            # Free the source bf16 working set BEFORE serializing. On low-RAM machines,
+            # holding bf16 + int4 + the save buffer simultaneously overflows RAM and the
+            # save thrashes swap forever. After in-place quantization the bf16 block
+            # tensors are dereferenced; gc reclaims them and the mmap unmaps.
+            del builder
+            gc.collect()
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
+
             print(f"[save] {name}: writing quantized weights to disk (several GB, ~1-3 min)...", flush=True)
             save_quantized(inner, weights_path, qmap_path)
             print(f"[done] {name}:")
             print(f"        {weights_path}")
             print(f"        {qmap_path}\n")
 
-            del inner, builder
+            del inner
             gc.collect()
             if device.type == "cuda":
                 torch.cuda.empty_cache()

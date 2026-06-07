@@ -265,6 +265,11 @@ def load_prequantized(
     state_dict = load_file(weights_path)
     with open(qmap_path) as f:
         qmap = json.load(f)
-    requantize(meta_model, state_dict, qmap, device=device)
+    # Reconstruct on CPU first: `requantize` directly on the GPU holds a large transient
+    # (full-precision-sized) allocation that OOMs a 24GB card. We rebuild the int model on
+    # CPU (cheap), then move the small int weights to the target device.
+    requantize(meta_model, state_dict, qmap, device=torch.device("cpu"))
+    if device.type != "cpu":
+        meta_model.to(device)
     logger.info(f"Loaded prequantized weights <- {weights_path}")
     return meta_model
