@@ -273,3 +273,47 @@ def load_prequantized(
         meta_model.to(device)
     logger.info(f"Loaded prequantized weights <- {weights_path}")
     return meta_model
+
+
+# ---------------------------------------------------------------------------
+# bitsandbytes 4-bit (nf4) — robust + fast alternative to quanto int4 for the
+# transformer. Replaces nn.Linear with bnb Linear4bit; quantization happens when
+# the module is moved to CUDA. Prebuilt kernels, no nvcc, fast load.
+# ---------------------------------------------------------------------------
+
+
+def quantize_transformer_bnb_4bit(
+    model: torch.nn.Module,
+    compute_dtype: torch.dtype = torch.bfloat16,
+    skip_substrings: tuple = (),
+) -> torch.nn.Module:
+    """Recursively replace ``nn.Linear`` with ``bitsandbytes.nn.Linear4bit`` (nf4) in place.
+
+    Call ``model.to("cuda")`` afterwards to actually quantize the weights to 4-bit on the GPU.
+    Linears whose attribute name contains a ``skip_substrings`` entry are left in full precision.
+    """
+    import bitsandbytes as bnb  # noqa: PLC0415
+    import torch.nn as nn  # noqa: PLC0415
+
+    for name, child in list(model.named_children()):
+        if isinstance(child, nn.Linear) and not any(s in name for s in skip_substrings):
+            new = bnb.nn.Linear4bit(
+                child.in_features,
+                child.out_features,
+                bias=child.bias is not None,
+                compute_dtype=compute_dtype,
+                quant_type="nf4",
+                compress_statistics=True,
+            )
+            new.weight = bnb.nn.Params4bit(
+                child.weight.data.to(compute_dtype),
+                requires_grad=False,
+                quant_type="nf4",
+                compress_statistics=True,
+            )
+            if child.bias is not None:
+                new.bias = nn.Parameter(child.bias.data.to(compute_dtype), requires_grad=False)
+            setattr(model, name, new)
+        else:
+            quantize_transformer_bnb_4bit(child, compute_dtype, skip_substrings)
+    return model

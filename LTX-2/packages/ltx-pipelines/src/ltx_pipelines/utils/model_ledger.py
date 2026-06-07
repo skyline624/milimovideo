@@ -197,6 +197,16 @@ class ModelLedger:
             raise ValueError(
                 "Transformer not initialized. Please provide a checkpoint path to the ModelLedger constructor."
             )
+        if os.environ.get("MILIMO_TRANSFORMER_BNB"):
+            # bitsandbytes 4-bit (nf4): build the bf16 transformer (mmap from the checkpoint),
+            # replace its Linear layers with bnb Linear4bit, then move to GPU to quantize.
+            # Fast + robust (prebuilt kernels, no nvcc), unlike the quanto int4 tinygemm path.
+            # NOTE: the checkpoint here must hold the bf16 transformer weights (not the slim).
+            from ltx_core.quantization import quantize_transformer_bnb_4bit
+
+            inner = self.transformer_builder.build(device="cpu", dtype=self.dtype)
+            quantize_transformer_bnb_4bit(inner, compute_dtype=self.dtype)
+            return X0Model(inner.to(self.device)).eval()
         if self.quant_mode:
             # optimum-quanto path (takes precedence over fp8).
             from ltx_core.quantization import (
@@ -219,8 +229,10 @@ class ModelLedger:
                 meta_model = self.transformer_builder.meta_model(
                     config, self.transformer_builder.module_ops
                 )
+                # load_prequantized already places the int model on self.device; an extra
+                # .to() here re-traverses the quanto tinygemm tensors and can hang.
                 load_prequantized(meta_model, weights_path, qmap_path, self.device)
-                return X0Model(meta_model).to(self.device).eval()
+                return X0Model(meta_model).eval()
 
             # Slow path (high RAM): build full precision on CPU (LoRAs fused here),
             # then quantize block-by-block (each block -> GPU -> quantize -> freeze -> CPU).
