@@ -202,11 +202,40 @@ class ModelLedger:
             # replace its Linear layers with bnb Linear4bit, then move to GPU to quantize.
             # Fast + robust (prebuilt kernels, no nvcc), unlike the quanto int4 tinygemm path.
             # NOTE: the checkpoint here must hold the bf16 transformer weights (not the slim).
-            from ltx_core.quantization import quantize_transformer_bnb_4bit
+            from ltx_core.quantization import (
+                bnb_transformer_path,
+                load_transformer_bnb,
+                quantize_transformer_bnb_4bit,
+                save_transformer_bnb,
+            )
 
+            # Keep the input/output projections in bf16: they are small + sensitive (same as
+            # quanto's exclude list) AND patchify_proj/audio_patchify_proj are referenced by a
+            # plain (non-nn.Module) preprocessor — replacing them would leave that stale CPU
+            # reference, causing a device mismatch at forward time.
+            bnb_skip = ("patchify_proj", "audio_patchify_proj", "proj_out", "audio_proj_out")
+            bnb_dir = os.environ.get("MILIMO_BNB_DIR") or os.path.dirname(self.checkpoint_path)
+            bnb_path = bnb_transformer_path(bnb_dir, self.loras)
+
+            # Fast path (no USB): a previously-saved bnb 4-bit transformer (~10GB) exists.
+            # Build an architecture-only meta skeleton (config from the checkpoint metadata,
+            # which the local slim carries) and load the saved 4-bit weights into it.
+            if os.path.exists(bnb_path):
+                config = self.transformer_builder.model_config()
+                meta_model = self.transformer_builder.meta_model(
+                    config, self.transformer_builder.module_ops
+                )
+                load_transformer_bnb(meta_model, bnb_path, self.device, self.dtype, bnb_skip)
+                return X0Model(meta_model).eval()
+
+            # Slow path: build the bf16 transformer (mmap from the bf16 checkpoint) and
+            # bnb-quantize it. Set MILIMO_TRANSFORMER_BNB_SAVE=1 to persist for fast reloads.
             inner = self.transformer_builder.build(device="cpu", dtype=self.dtype)
-            quantize_transformer_bnb_4bit(inner, compute_dtype=self.dtype)
-            return X0Model(inner.to(self.device)).eval()
+            quantize_transformer_bnb_4bit(inner, compute_dtype=self.dtype, skip_substrings=bnb_skip)
+            inner = inner.to(self.device)
+            if os.environ.get("MILIMO_TRANSFORMER_BNB_SAVE"):
+                save_transformer_bnb(inner, bnb_path)
+            return X0Model(inner).eval()
         if self.quant_mode:
             # optimum-quanto path (takes precedence over fp8).
             from ltx_core.quantization import (

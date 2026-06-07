@@ -317,3 +317,70 @@ def quantize_transformer_bnb_4bit(
         else:
             quantize_transformer_bnb_4bit(child, compute_dtype, skip_substrings)
     return model
+
+
+def _build_bnb_skeleton(
+    model: torch.nn.Module,
+    compute_dtype: torch.dtype = torch.bfloat16,
+    skip_substrings: tuple = (),
+) -> torch.nn.Module:
+    """Replace nn.Linear with EMPTY bnb Linear4bit (no weight copy) so a saved 4-bit
+    state dict can be loaded into the skeleton — used by the fast (no-USB) load path."""
+    import bitsandbytes as bnb  # noqa: PLC0415
+    import torch.nn as nn  # noqa: PLC0415
+
+    for name, child in list(model.named_children()):
+        if isinstance(child, nn.Linear) and not any(s in name for s in skip_substrings):
+            new = bnb.nn.Linear4bit(
+                child.in_features,
+                child.out_features,
+                bias=child.bias is not None,
+                compute_dtype=compute_dtype,
+                quant_type="nf4",
+                compress_statistics=True,
+            )
+            setattr(model, name, new)
+        else:
+            _build_bnb_skeleton(child, compute_dtype, skip_substrings)
+    return model
+
+
+def bnb_transformer_path(out_dir: str, loras: tuple | None = None) -> str:
+    """Local path for the saved bnb 4-bit transformer (keyed by the LoRA set, portable)."""
+    import hashlib
+    import os
+
+    lora_sig = "|".join(
+        f"{os.path.basename(str(getattr(lora, 'path', lora)))}:{getattr(lora, 'strength', '')}"
+        for lora in (loras or ())
+    )
+    key = hashlib.sha1(f"bnb-nf4|{lora_sig}".encode()).hexdigest()[:8]
+    return os.path.join(out_dir, f"ltx-transformer.bnb4bit.{key}.pt")
+
+
+def save_transformer_bnb(model: torch.nn.Module, path: str) -> None:
+    """Save a bnb-quantized transformer's state (4-bit packed weights + quant_state + bf16
+    excluded layers). ~10GB; reloadable without the 43GB bf16 or re-quantization."""
+    import os
+
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    torch.save(model.state_dict(), path)
+    logger.info(f"Saved bnb 4-bit transformer -> {path}")
+
+
+def load_transformer_bnb(
+    meta_model: torch.nn.Module,
+    path: str,
+    device: torch.device | str,
+    compute_dtype: torch.dtype = torch.bfloat16,
+    skip_substrings: tuple = (),
+) -> torch.nn.Module:
+    """Load a saved bnb 4-bit transformer into a (meta) architecture skeleton, then move to
+    device. Avoids reading the 43GB bf16 and re-quantizing."""
+    if isinstance(device, str):
+        device = torch.device(device)
+    _build_bnb_skeleton(meta_model, compute_dtype, skip_substrings)
+    state_dict = torch.load(path, map_location="cpu", weights_only=False)
+    meta_model.load_state_dict(state_dict, strict=False, assign=True)
+    logger.info(f"Loaded bnb 4-bit transformer <- {path}")
+    return meta_model.to(device)

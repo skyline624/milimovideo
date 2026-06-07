@@ -66,7 +66,11 @@ def main() -> int:
         images=[],
         upscale=False,
     )
-    frame_list = list(frames)  # force the lazy generator to actually run the diffusion
+    # The pipeline returns a lazy generator; the VAE decode runs as we iterate, AFTER the
+    # __call__'s inference_mode context exits. Consume it under no_grad so the decode isn't
+    # autograd-tracked (and doesn't choke on inference-mode tensors).
+    with torch.no_grad():
+        frame_list = list(frames)  # force the lazy generator to actually run the diffusion
 
     print("\n=== OK ===")
     print(f"frames generated: {len(frame_list)}")
