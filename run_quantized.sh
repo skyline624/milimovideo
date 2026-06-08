@@ -13,8 +13,11 @@ PY="$VENV/bin/python"
 export MILIMO_TRANSFORMER_BNB=1     # transformer en 4-bit bitsandbytes
 export MILIMO_GEMMA_4BIT=1          # text encoder gemma en 4-bit
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-export CUDA_HOME=/usr
-export PATH="$VENV/bin:/usr/bin:$PATH"
+
+# Vite exige Node >= 20 ; /usr/bin/node est peut-être trop vieux -> préférer le node nvm.
+NODE_BIN="$(ls -d "$HOME"/.nvm/versions/node/v*/bin 2>/dev/null | sort -V | tail -1)"
+export PATH="$VENV/bin${NODE_BIN:+:$NODE_BIN}:$PATH"
+echo "node: $(command -v node) ($(node --version 2>/dev/null))"
 
 [ -x "$PY" ] || { echo "venv introuvable: $PY"; exit 1; }
 
