@@ -573,14 +573,19 @@ async def generate_standard_video_task(job_id: str, params: dict, pipeline):
             video_chunks_number = get_video_chunks_number(num_frames, tiling_config)
             
             try:
-                encode_video(
-                    video,
-                    int(params.get("fps", 25)),
-                    audio,
-                    AUDIO_SAMPLE_RATE if audio is not None else None,
-                    output_path,
-                    video_chunks_number
-                )
+                # The pipeline returns a lazy frame generator; the VAE decode runs here as
+                # encode_video iterates it, AFTER the pipeline's inference_mode context has
+                # exited. Run under no_grad so the decode isn't autograd-tracked (otherwise:
+                # "Inference tensors cannot be saved for backward").
+                with torch.no_grad():
+                    encode_video(
+                        video,
+                        int(params.get("fps", 25)),
+                        audio,
+                        AUDIO_SAMPLE_RATE if audio is not None else None,
+                        output_path,
+                        video_chunks_number
+                    )
             finally:
                 import gc
                 gc.collect()
