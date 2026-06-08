@@ -37,11 +37,17 @@ class ModelManager:
         # Priority 2: FP8 (Smaller, but requires cast on MPS)
         ckpt_fp8 = os.path.join(models_dir, "checkpoints", "ltx-2-19b-distilled-fp8.safetensors")
         
-        # quanto quantization needs the full-precision (bf16) checkpoint as source.
+        # bitsandbytes 4-bit (recommended for 24GB GPUs) builds from the bf16 transformer
+        # weights, so keep them on fast LOCAL storage as ltx-2-19b-distilled.bf16.safetensors.
+        ckpt_bf16 = os.path.join(models_dir, "checkpoints", "ltx-2-19b-distilled.bf16.safetensors")
         quant_mode = os.environ.get("MILIMO_QUANT")
+        bnb = os.environ.get("MILIMO_TRANSFORMER_BNB")
 
         selected_ckpt = ckpt_full
-        if quant_mode:
+        if bnb:
+            selected_ckpt = ckpt_bf16 if os.path.exists(ckpt_bf16) else ckpt_full
+            logger.info(f"[bnb-4bit] Building transformer from bf16 checkpoint: {selected_ckpt}")
+        elif quant_mode:
             # Force the full bf16 checkpoint; quanto quantizes from it on load.
             selected_ckpt = ckpt_full
             if os.path.exists(ckpt_full):

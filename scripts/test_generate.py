@@ -20,8 +20,8 @@ def main() -> int:
     repo = os.path.dirname(here)
     models = os.path.join(repo, "LTX-2", "models")
     ckpts = os.path.join(models, "checkpoints")
-    # bnb transformer needs the bf16 transformer weights -> use the USB bf16 (the slim has none).
-    ckpt = os.environ.get("MILIMO_CKPT", "/mnt/usb/ltx-2-19b-distilled.safetensors")
+    # bnb transformer needs the bf16 transformer weights -> use the LOCAL bf16 (fast, reliable).
+    ckpt = os.environ.get("MILIMO_CKPT") or os.path.join(ckpts, "ltx-2-19b-distilled.bf16.safetensors")
     gemma_root = os.path.join(models, "text_encoders", "gemma3")
     lora = os.path.join(ckpts, "ltx-2-19b-distilled-lora-384.safetensors")
     spatial = os.path.join(models, "upscalers", "ltx-2-spatial-upscaler-x2-1.0.safetensors")
